@@ -4,10 +4,8 @@ import { google } from "googleapis";
 const app = express();
 app.use(express.json());
 
-// Google Sheet ID (lägg in i Render ENV)
 const SHEET_ID = process.env.SHEET_ID;
 
-// Google auth (lägg JSON i Render ENV)
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
   scopes: ["https://www.googleapis.com/auth/spreadsheets"]
@@ -15,50 +13,93 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: "v4", auth });
 
-// Vapi Tool Backend Endpoint
-app.post("/check_and_book_table", async (req, res) => {
-  try {
-    const { date, time, guests } = req.body;
+/*
+COLUMN MAP:
+A = Bord
+B = Status (Ledig/Bokat)
+C = Tid
+D = Antal MAX
+E = Antal Gäster
+F = Namn
+G = Telefon
+H = Note
+I = Bokad av
+J = Datum
+*/
 
+app.post("/book_table", async (req, res) => {
+  const { date, time, guests, name, phone, note } = req.body;
+
+  try {
     const read = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
-      range: "Bokningar!A2:D200"
+      range: "Bokningar!A2:J500"
     });
 
     const rows = read.data.values || [];
-    let match = null;
 
-    for (let i = 0; i < rows.length; i++) {
-      const [rDate, rTime, table, status] = rows[i];
+    let targetRows = [];
 
-      if (rDate === date && rTime === time && status === "ledig") {
-        match = { rowIndex: i + 2, table };
+    // 1–3 gäster → bord 1–3
+    if (guests <= 3) {
+      targetRows = rows.filter(r => r[0].includes("Bord 1") || r[0].includes("Bord 2") || r[0].includes("Bord 3"));
+    }
+    // 4–6 gäster → bord 4–5
+    else {
+      targetRows = rows.filter(r => r[0].includes("Bord 4") || r[0].includes("Bord 5"));
+    }
+
+    // hitta ledigt bord vid rätt tid + datum
+    let foundRowIndex = null;
+
+    for (let i = 0; i < targetRows.length; i++) {
+      const fullIndex = rows.indexOf(targetRows[i]); // behövs för real rad i sheet
+      const [bord, status, rTime, maxGuests, guestCount, rName, rPhone, rNote, bookedBy, rDate] = targetRows[i];
+
+      if (
+        status === "Ledig" &&
+        rTime === time &&
+        rDate === date
+      ) {
+        foundRowIndex = fullIndex + 2; // +2 pga header
         break;
       }
     }
 
-    if (!match) {
-      return res.json({
-        success: false,
-        message: "Inga lediga bord hittades."
-      });
+    if (!foundRowIndex) {
+      return res.json({ success: false, message: "Inga lediga bord hittades." });
     }
 
+    // Skicka uppdateringar (bokat + fyll i info)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `Bokningar!D${match.rowIndex}`,
+      range: `Bokningar!B${foundRowIndex}:I${foundRowIndex}`,
       valueInputOption: "RAW",
-      requestBody: { values: [["bokad"]] }
+      requestBody: {
+        values: [
+          [
+            "Bokat",
+            time,
+            "", // MAX stays unchanged
+            guests,
+            name,
+            phone,
+            note || "",
+            "AI"
+          ]
+        ]
+      }
     });
 
-    res.json({
+    return res.json({
       success: true,
-      table: match.table,
-      message: `Bord ${match.table} är bokat.`
+      message: `Bordet är bokat för ${guests} personer.`,
+      row: foundRowIndex
     });
 
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
   }
 });
 
